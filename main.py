@@ -46,7 +46,7 @@ def run(json):
         minio_skey = json['minio']['skey']
         minio_endpoint = json['minio']['endpoint_url']
         
-        mc = MinioClient(minio_id, minio_key, minio_skey, minio_endpoint)
+        mc = MinioClient(minio_endpoint, minio_id, minio_key, secure=True, session_token=minio_skey)
 
         # It is strongly suggested to use the get_object and put_object methods of the MinioClient
         # as they handle input paths provided by STELAR API appropriately. (S3 like paths)
