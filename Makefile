@@ -1,6 +1,6 @@
 
 DOCKER=docker
-IMGTAG=petroud/npk-fertilizer-match:latest
+IMGTAG=img.stelar.gr/stelar/npk-fertilizer-match:latest
 IMGPATH=.
 DOCKERFILE=$(IMGPATH)/Dockerfile
 
