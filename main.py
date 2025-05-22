@@ -2,154 +2,99 @@ import json
 import sys
 import traceback
 from utils.mclient import MinioClient
+import pandas as pd
+import os
+import tempfile
 
-# Here you may define the imports your tool needs...
-# import pandas as pd
-# import numpy as np
-# ...
+REQUIRED_COLUMNS = {"N", "P", "K"}
 
-def run(json):
+def npk_distance(npk1, npk2):
+    """Euclidean distance between two N‑P‑K triples."""
+    return sum((a - b) ** 2 for a, b in zip(npk1, npk2)) ** 0.5
 
-    """
-        This is the core method that initiates tool .py files execution. 
-        It can be as large and complex as the tools needs. In this file you may import, call,
-        and define any lib, method, variable or function you need for you tool execution.
-        Any specific files you need can be in the same directory with this main.py or in subdirs
-        with appropriate import statements with respect to dir structure.
+def match_fertilizers(df_npk: pd.DataFrame, df_fert: pd.DataFrame) -> pd.DataFrame:
+    """Attach the closest‑match fertilizer (by N‑P‑K composition) to every user row."""
 
-        Any logic you implement here is going to be copied inside your tool image when 
-        you build it using docker build or the provided Makefile.
-        
-            The MinIO initialization that is given down below is an example you may use it or not.
-            MinIO access credentials are in the form of <ACCESS ID, ACCESS KEY, SESSION TOKEN>
-            and are generated upon the OAuth 2.0 token of the user executing the tool. 
+    # Guard: validate schema
+    if not (REQUIRED_COLUMNS <= set(df_npk.columns) and REQUIRED_COLUMNS <= set(df_fert.columns)):
+        raise ValueError(f"Both CSVs must contain columns {REQUIRED_COLUMNS}.")
 
-            For development purpose you may define your own credentials for your local MinIO 
-            instance by commenting the MinIO init part.
+    result = df_npk.copy()
+    result["Fertilizzante"] = ""
 
-    """
+    # Pre‑extract fertilizer tuples once for speed
+    fert_tuples = [((row.N, row.P, row.K), row.Nome) for _, row in df_fert.iterrows()]
+
+    for idx, row in result.iterrows():
+        user_npk = (row.N, row.P, row.K)
+        # Find best match
+        best = min(fert_tuples, key=lambda tpl: npk_distance(user_npk, tpl[0]))
+        result.at[idx, "Fertilizzante"] = best[1]
+
+    return result
+
+
+def run(json: dict):
 
     try:
-        """
-        Init a MinIO Client using the custom STELAR MinIO util file.
+        # --------------- MinIO initialisation ---------------
+        minio_cfg = json.get("minio", {})
+        mc = MinioClient(
+            minio_cfg.get("endpoint_url"),
+            minio_cfg.get("id"),
+            minio_cfg.get("key"),
+            secure=True,
+            session_token=minio_cfg.get("skey"),
+        )
 
-        We access the MinIO credentials from the JSON field named 'minio' which 
-        was acquired along the tool parameters.
+        # --------------- Retrieve user parameters -----------
+        inputs = json["input"]
+        outputs = json["output"]
 
-        This credentials can be used for tool specific access too wherever needed
-        inside this main.py file.
+        npk_remote_path = inputs["npk_values"][0]
+        fert_remote_path = inputs["fertilizer_dataset"][0]
+        output_remote_path = outputs["matched_fertilizers"]
 
-        """
-        ################################## MINIO INIT #################################
-        minio_id = json['minio']['id']
-        minio_key = json['minio']['key']
-        minio_skey = json['minio']['skey']
-        minio_endpoint = json['minio']['endpoint_url']
-        
-        mc = MinioClient(minio_id, minio_key, minio_skey, minio_endpoint)
+        # ---------------- IO: download inputs ----------------
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_npk = os.path.join(tmpdir, "npk.csv")
+            local_fert = os.path.join(tmpdir, "fert.csv")
 
-        # It is strongly suggested to use the get_object and put_object methods of the MinioClient
-        # as they handle input paths provided by STELAR API appropriately. (S3 like paths)
-        ###############################################################################
+            mc.get_object(s3_path=npk_remote_path, local_path=local_npk)
+            mc.get_object(s3_path=fert_remote_path, local_path=local_fert)
 
+            # ---------------- Core logic --------------------
+            df_npk = pd.read_csv(local_npk)
+            df_fert = pd.read_csv(local_fert)
+            df_out = match_fertilizers(df_npk, df_fert)
 
-        """
-        Acquire tool specific parameters from json['parameters] which was given by the 
-        KLMS Data API during the creation of the Tool Execution Task.
+            local_out = os.path.join(tmpdir, "matched.csv")
+            df_out.to_csv(local_out, index=False)
 
-        An example of parameters for a tool that adds two numbers x,y could be:
-        {
-            "inputs": {
-                "any_name": [
-                    "XXXXXXXX-bucket/temp1.csv",
-                    "XXXXXXXX-bucket/temp2.csv"
-                ],
-                "temp_files": [
-                    "XXXXXXXX-bucket/intermediate.json"
-                ]
-                
+            # --------------- Upload result ------------------
+            mc.put_object(s3_path=output_remote_path, file_path=local_out)
+
+        # --------------- Build response ---------------------
+        return {
+            "message": "Tool executed successfully!",
+            "output": {
+                "matched_fertilizers": output_remote_path,
             },
-            "outputs": {
-                "correlations_file": "/path/to/write/the/file",
-                "log_file": "/path/to/write/the/file"
+            "metrics": {
+                "records_in": len(df_npk),
+                "records_out": len(df_out),
             },
-            "parameters": {
-                "x": 5,
-                "y": 2,
-            },
-            "secrets": {
-                "api_key": "AKIASIOSFODNNEXAMPLE"
-            },
-            "minio": {
-                "endpoint_url": "minio.XXXXXX.gr",
-                "id": "XXXXXXXX",
-                "key": "XXXXXXXX",
-                "skey": "XXXXXXXX",
-            }
-
+            "status": "success",
         }
 
-        The parameters JSON field can be as large as the tool needs.
-
-        For our simple example in this main.py we would access x,y as:
-            x = json['parameters']['x']
-            y = json['parameters']['y']
-        """        
-        x = json['parameters']['x'] 
-        y = json['parameters']['y']
-
-
-        """
-
-            Here you may implement the execution logic of your tool. At this point you have available:
-
-                - Tool specific parameters from json['parameters']
-                - A client for MinIO acccess named 'mc' with method putObject(...) and getObject(...)
-        """
-
-        ##### Tool Logic #####
-        z=x+y
-
-        """
-            This json should contain any output of your tool that you consider valuable. Metrics field affects
-            the metadata of the task execution. Status can be conventionally linked to HTTP status codes in order
-            to mark success or error states.
-
-            Output contains the resource ids from MinIO in which the valuable output data of your tool should be written
-            An example of the output json is:
-
-            {
-                "message": "Tool executed successfully!",
-                "outputs": {
-                    "correlations_file": "XXXXXXXXX-bucket/2824af95-1467-4b0b-b12a-21eba4c3ac0f.csv",
-                    "synopses_file": "XXXXXXXXX-bucket/21eba4c3ac0f.csv"			
-                }
-                "metrics": {	
-                    "memory_allocated": "2048",
-                    "peak_cpu_usage": "2.8"
-                },
-                "status": "success"
-            }
-
-        """
-        json= {
-                'message': 'Tool Executed Succesfully',
-                'outputs': {}, 
-                'metrics': { 
-                    'z': z, 
-                }, 
-                'status': "success",
-              }
-
-        return json
-    except Exception as e:
+    except Exception:
         print(traceback.format_exc())
         return {
-            'message': 'An error occurred during data processing.',
-            'error': traceback.format_exc(),
-            'status': 500
+            "message": "An error occurred during fertilizer matching.",
+            "error": traceback.format_exc(),
+            "status": "error",
         }
-    
+
 if __name__ == '__main__':
     if len(sys.argv) != 3:
         raise ValueError("Please provide 2 files.")
